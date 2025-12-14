@@ -5,9 +5,12 @@ from __future__ import annotations
 import logging
 import uuid
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any, Optional
 
-from parcer.exchanges.protocol import ExchangeClient, Order
+if TYPE_CHECKING:
+    from ..history import TradeHistory
+
+from ..exchanges.protocol import ExchangeClient, Order
 
 from .position import Position, PositionStatus
 
@@ -89,6 +92,7 @@ class OrderManager:
         position: Position,
         client_a: ExchangeClient,
         client_b: ExchangeClient,
+        history: "TradeHistory | None" = None,
     ) -> bool:
         """Execute entry orders for both legs of the position."""
         try:
@@ -110,6 +114,16 @@ class OrderManager:
                 position.leg_a_quantity,
                 entry_price_a,
             )
+            
+            # Record order placement
+            if history:
+                history.record_order_placed(
+                    position=position,
+                    order_side=position.leg_a_side,
+                    order_type="market",
+                    quantity=position.leg_a_quantity,
+                    price=entry_price_a,
+                )
 
             order_b = await client_b.place_market_order(
                 symbol=position.symbol_b,
@@ -125,6 +139,16 @@ class OrderManager:
                 position.leg_b_quantity,
                 entry_price_b,
             )
+            
+            # Record second order placement
+            if history:
+                history.record_order_placed(
+                    position=position,
+                    order_side=position.leg_b_side,
+                    order_type="market",
+                    quantity=position.leg_b_quantity,
+                    price=entry_price_b,
+                )
 
             position.mark_opened(entry_price_a, entry_price_b)
             self.active_positions.append(position)
@@ -146,6 +170,7 @@ class OrderManager:
         position: Position,
         client_a: ExchangeClient,
         client_b: ExchangeClient,
+        history: "TradeHistory | None" = None,
     ) -> bool:
         """Execute exit orders for both legs of the position."""
         try:
