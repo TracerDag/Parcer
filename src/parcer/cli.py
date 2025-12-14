@@ -66,8 +66,7 @@ def init_components(config_path: Optional[Path] = None):
     
     data_dir = Path("data")
     history = TradeHistory(data_dir)
-    order_manager = OrderManager()
-    # Order manager will call history methods directly as needed
+    order_manager = OrderManager(settings, history)
     
     return container, history, order_manager
 

@@ -64,6 +64,7 @@ def test_trade_open_command_parsing(mock_init_components, mock_create_clients, m
     mock_position.position_id = "test-pos-123"
     mock_position.entry_spread = 0.05
     mock_order_manager.create_position.return_value = mock_position
+    mock_order_manager.entry_order = AsyncMock(return_value=True)
     
     # Run command
     result = runner.invoke(app, [
@@ -94,15 +95,9 @@ def test_trade_open_command_parsing(mock_init_components, mock_create_clients, m
 
 
 @patch('src.parcer.cli.init_components')
-@patch('src.parcer.cli.build_container') 
-@patch('src.parcer.cli.load_settings')
-def test_trade_open_scenario_validation(mock_load_settings, mock_build_container, mock_init_components):
+def test_trade_open_scenario_validation(mock_init_components):
     """Test trade_open command validates scenario parameter."""
     runner = CliRunner()
-    
-    # Mock settings
-    mock_settings = Mock()
-    mock_load_settings.return_value = mock_settings
     
     # Mock components
     mock_container = Mock()
@@ -126,21 +121,21 @@ def test_trade_open_scenario_validation(mock_load_settings, mock_build_container
 
 
 @patch('src.parcer.cli.init_components')
-@patch('src.parcer.cli.build_container')
-@patch('src.parcer.cli.load_settings') 
-def test_trade_close_command_parsing(mock_load_settings, mock_build_container, mock_init_components):
+def test_trade_close_command_parsing(mock_init_components):
     """Test trade_close command parameter parsing."""
     runner = CliRunner()
-    
-    # Mock settings
-    mock_settings = Mock()
-    mock_load_settings.return_value = mock_settings
     
     # Mock components
     mock_container = Mock()
     mock_history = Mock()
     mock_order_manager = Mock()
     mock_init_components.return_value = (mock_container, mock_history, mock_order_manager)
+    
+    # Mock exchange clients as dict
+    mock_container.exchange_clients = {
+        "binance": Mock(),
+        "okx": Mock()
+    }
     
     # Mock position found and open
     mock_position = Mock()
@@ -169,15 +164,9 @@ def test_trade_close_command_parsing(mock_load_settings, mock_build_container, m
 
 
 @patch('src.parcer.cli.init_components')
-@patch('src.parcer.cli.build_container')
-@patch('src.parcer.cli.load_settings')
-def test_trade_close_position_not_found(mock_load_settings, mock_build_container, mock_init_components):
+def test_trade_close_position_not_found(mock_init_components):
     """Test trade_close when position is not found."""
     runner = CliRunner()
-    
-    # Mock settings
-    mock_settings = Mock()
-    mock_load_settings.return_value = mock_settings
     
     # Mock components
     mock_container = Mock()
@@ -200,15 +189,9 @@ def test_trade_close_position_not_found(mock_load_settings, mock_build_container
 
 
 @patch('src.parcer.cli.init_components')
-@patch('src.parcer.cli.build_container')
-@patch('src.parcer.cli.load_settings')
-def test_positions_list_command(mock_load_settings, mock_build_container, mock_init_components):
+def test_positions_list_command(mock_init_components):
     """Test positions list command."""
     runner = CliRunner()
-    
-    # Mock settings
-    mock_settings = Mock()
-    mock_load_settings.return_value = mock_settings
     
     # Mock components
     mock_container = Mock()
@@ -217,6 +200,7 @@ def test_positions_list_command(mock_load_settings, mock_build_container, mock_i
     mock_init_components.return_value = (mock_container, mock_history, mock_order_manager)
     
     # Mock positions
+    from datetime import datetime, timezone
     mock_position1 = Mock()
     mock_position1.position_id = "pos-1"
     mock_position1.scenario = "a"
@@ -226,8 +210,7 @@ def test_positions_list_command(mock_load_settings, mock_build_container, mock_i
     mock_position1.status.value = "open"
     mock_position1.entry_spread = 0.05
     mock_position1.pnl = 0.002
-    mock_position1.created_at = Mock()
-    mock_position1.created_at.strftime.return_value = "12:34:56"
+    mock_position1.created_at = datetime(2023, 12, 1, 12, 34, 56, tzinfo=timezone.utc)
     
     mock_position2 = Mock()
     mock_position2.position_id = "pos-2"
@@ -238,8 +221,7 @@ def test_positions_list_command(mock_load_settings, mock_build_container, mock_i
     mock_position2.status.value = "closed"
     mock_position2.entry_spread = None
     mock_position2.pnl = None
-    mock_position2.created_at = Mock()
-    mock_position2.created_at.strftime.return_value = "11:22:33"
+    mock_position2.created_at = datetime(2023, 12, 1, 11, 22, 33, tzinfo=timezone.utc)
     
     mock_order_manager.positions.values.return_value = [mock_position1, mock_position2]
     mock_order_manager.get_active_positions.return_value = [mock_position1]
@@ -253,16 +235,10 @@ def test_positions_list_command(mock_load_settings, mock_build_container, mock_i
 
 
 @patch('src.parcer.cli.init_components')
-@patch('src.parcer.cli.build_container')
-@patch('src.parcer.cli.load_settings')
 @patch('asyncio.run')
-def test_balance_check_command(mock_asyncio_run, mock_load_settings, mock_build_container, mock_init_components):
+def test_balance_check_command(mock_asyncio_run, mock_init_components):
     """Test balance check command."""
     runner = CliRunner()
-    
-    # Mock settings
-    mock_settings = Mock()
-    mock_load_settings.return_value = mock_settings
     
     # Mock components
     mock_container = Mock()
@@ -314,8 +290,15 @@ def test_history_show_command(mock_init_components):
         "exchange_a": "binance",
         "exchange_b": "okx",
         "symbol_a": "BTCUSDT",
+        "symbol_b": "BTCUSDT",
+        "order_type": "market",
+        "side": "buy",
+        "quantity": 0.1,
+        "price": 50000.0,
         "pnl": 0.0,
-        "status": "opened"
+        "status": "opened",
+        "error_message": "",
+        "metadata": ""
     }
     
     mock_history.get_recent_trades.return_value = [mock_trade1]
