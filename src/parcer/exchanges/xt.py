@@ -1,0 +1,191 @@
+"""XT.COM exchange adapter."""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import logging
+import time
+from typing import Any
+from urllib.parse import urlencode
+
+logger = logging.getLogger(__name__)
+
+try:
+    import aiohttp
+except ImportError:
+    aiohttp = None
+
+from .base import BaseExchangeClient, ProxyConfig
+from .protocol import Balance, Order
+
+
+class XTClient(BaseExchangeClient):
+    """XT.COM exchange client."""
+
+    def __init__(
+        self,
+        api_key: str,
+        api_secret: str,
+        *,
+        sandbox: bool = False,
+        proxy: ProxyConfig | None = None,
+        **options: Any,
+    ):
+        super().__init__(
+            "xt",
+            api_key,
+            api_secret,
+            sandbox=sandbox,
+            proxy=proxy,
+            **options,
+        )
+        self.session = None
+
+    def get_base_url(self) -> str:
+        if self.sandbox:
+            return "https://api.xt.com"
+        return "https://api.xt.com"
+
+    async def _ensure_session(self) -> aiohttp.ClientSession:
+        if self.session is None:
+            if aiohttp is None:
+                raise ImportError("aiohttp is required for XT adapter")
+            connector = aiohttp.TCPConnector()
+            self.session = aiohttp.ClientSession(connector=connector)
+        return self.session
+
+    def _get_headers(self, signature: str, timestamp: str) -> dict[str, str]:
+        return {
+            "X-XT-APIKEY": self.api_key,
+            "X-XT-NONCE": timestamp,
+            "X-XT-SIGNATURE": signature,
+            "Content-Type": "application/json",
+            "User-Agent": "parcer/1.0",
+        }
+
+    def _sign_request(self, method: str, path: str, body: str = "") -> tuple[str, str]:
+        """Generate XT signature."""
+        timestamp = str(int(time.time() * 1000))
+        message = method + path + body + timestamp
+        signature = hmac.new(
+            self.api_secret.encode(),
+            message.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        return signature, timestamp
+
+    async def get_balance(self, asset: str | None = None) -> list[Balance] | Balance:
+        """Fetch account balance."""
+        session = await self._ensure_session()
+        path = "/spot/v1/balance"
+        signature, timestamp = self._sign_request("GET", path)
+        url = f"{self.get_base_url()}{path}"
+
+        async with session.get(url, headers=self._get_headers(signature, timestamp)) as resp:
+            if resp.status != 200:
+                raise Exception(f"Failed to fetch balance: {resp.status}")
+            data = await resp.json()
+
+        balances = []
+        for item in data.get("result", []):
+            curr = item.get("coin")
+            free = float(item.get("free", 0))
+            locked = float(item.get("locked", 0))
+            if free > 0 or locked > 0:
+                balances.append(Balance(curr, free, locked))
+
+        if asset:
+            for b in balances:
+                if b.asset.upper() == asset.upper():
+                    return b
+            return Balance(asset.upper(), 0, 0)
+
+        return balances
+
+    async def place_market_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+    ) -> Order:
+        """Place a market order."""
+        session = await self._ensure_session()
+        path = "/spot/v1/placeOrder"
+
+        body = json.dumps({
+            "symbol": symbol.upper(),
+            "side": side.lower(),
+            "type": "market",
+            "quantity": str(quantity),
+        })
+
+        signature, timestamp = self._sign_request("POST", path, body)
+        url = f"{self.get_base_url()}{path}"
+
+        async with session.post(url, data=body, headers=self._get_headers(signature, timestamp)) as resp:
+            if resp.status != 200:
+                raise Exception(f"Failed to place order: {resp.status}")
+            data = await resp.json()
+
+        order_data = data.get("result", {})
+        return Order(
+            str(order_data.get("orderId")),
+            symbol.upper(),
+            side.lower(),
+            quantity,
+            0.0,
+            order_data.get("status", "").lower(),
+        )
+
+    async def cancel_order(self, order_id: str, symbol: str | None = None) -> Order:
+        """Cancel an active order."""
+        if not symbol:
+            raise ValueError("XT requires symbol to cancel order")
+
+        session = await self._ensure_session()
+        path = "/spot/v1/cancelOrder"
+
+        body = json.dumps({
+            "symbol": symbol.upper(),
+            "orderId": order_id,
+        })
+
+        signature, timestamp = self._sign_request("POST", path, body)
+        url = f"{self.get_base_url()}{path}"
+
+        async with session.post(url, data=body, headers=self._get_headers(signature, timestamp)) as resp:
+            if resp.status != 200:
+                raise Exception(f"Failed to cancel order: {resp.status}")
+            data = await resp.json()
+
+        order_data = data.get("result", {})
+        return Order(
+            order_id,
+            symbol.upper(),
+            "",
+            0,
+            0.0,
+            order_data.get("status", "").lower(),
+        )
+
+    async def _fetch_spot_price(self, symbol: str) -> float | None:
+        """Fetch current spot price."""
+        session = await self._ensure_session()
+        url = f"{self.get_base_url()}/spot/v1/ticker"
+        params = {"symbol": symbol.upper()}
+
+        try:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                return float(data.get("result", {}).get("last"))
+        except Exception:
+            return None
+
+    async def close(self) -> None:
+        """Close connections."""
+        if self.session:
+            await self.session.close()
