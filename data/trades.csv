@@ -1,0 +1,1 @@
+timestamp,event_type,position_id,scenario,exchange_a,exchange_b,symbol_a,symbol_b,order_type,side,quantity,price,pnl,status,error_message,metadata
