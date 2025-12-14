@@ -11,8 +11,27 @@ trading:
   max_positions: 1
   fixed_order_size: 10.0
 
+arbitrage:
+  enabled: false
+  scenario: a
+  entry_threshold: 0.05
+  exit_threshold: 0.01
+  exchange_a: exchange_a
+  exchange_b: exchange_b
+  symbol: BTCUSDT
+
 exchanges:
-  example_exchange:
+  exchange_a:
+    enabled: true
+    sandbox: true
+    credentials:
+      api_key: "your_api_key"
+      api_secret: "your_api_secret"
+    options:
+      some_exchange_specific_flag: true
+      rate_limit_per_second: 10
+
+  exchange_b:
     enabled: true
     sandbox: true
     credentials:
