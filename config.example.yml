@@ -7,9 +7,9 @@ proxy:
   password: null
 
 trading:
-  leverage: 1
-  max_positions: 1
-  fixed_order_size: 10.0
+  leverage: 3  # Leverage for perpetual contracts (1x = no leverage)
+  max_positions: 2  # Maximum simultaneous positions
+  fixed_order_size: 100.0  # Fixed order size in USDT
 
 arbitrage:
   enabled: false

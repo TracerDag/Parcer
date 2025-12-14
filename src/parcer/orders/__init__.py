@@ -2,6 +2,11 @@
 
 from .manager import OrderManager, OrderSide, OrderStatus
 from .position import Position, PositionStatus
+from .risk_manager import (
+    RiskManager,
+    InsufficientBalanceError,
+    MaxPositionsError,
+)
 
 __all__ = [
     "OrderManager",
@@ -9,4 +14,7 @@ __all__ = [
     "OrderStatus",
     "Position",
     "PositionStatus",
+    "RiskManager",
+    "InsufficientBalanceError",
+    "MaxPositionsError",
 ]

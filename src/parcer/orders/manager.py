@@ -9,10 +9,12 @@ from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from ..history import TradeHistory
+    from ..settings import Settings
 
 from ..exchanges.protocol import ExchangeClient, Order
 
 from .position import Position, PositionStatus
+from .risk_manager import RiskManager, InsufficientBalanceError, MaxPositionsError
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +37,23 @@ class OrderStatus(Enum):
 
 
 class OrderManager:
-    """Manages order lifecycle for arbitrage positions."""
+    """Manages order lifecycle for arbitrage positions with risk management."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        settings: "Settings | None" = None,
+        history: "TradeHistory | None" = None,
+    ) -> None:
         self.positions: dict[str, Position] = {}
         self.active_positions: list[Position] = []
+        self.settings = settings
+        self.history = history
+        
+        # Initialize risk manager if settings provided
+        if settings:
+            self.risk_manager = RiskManager(settings, history)
+        else:
+            self.risk_manager = None
 
     def create_position(
         self,
@@ -94,12 +108,58 @@ class OrderManager:
         client_b: ExchangeClient,
         history: "TradeHistory | None" = None,
     ) -> bool:
-        """Execute entry orders for both legs of the position."""
+        """Execute entry orders for both legs of the position with risk management.
+        
+        Implements "both-or-nothing" execution: if one leg fails, the other is rolled back.
+        """
+        # Use provided history or instance history
+        hist = history or self.history
+        
         try:
             logger.info(
                 "Placing entry orders for position %s", position.position_id
             )
+            
+            # Risk management checks
+            if self.risk_manager:
+                try:
+                    # Check position limit
+                    self.risk_manager.check_position_limit(len(self.active_positions))
+                    
+                    # Set leverage if needed
+                    await self.risk_manager.set_leverage_if_needed(
+                        client_a, position.exchange_a, position.symbol_a
+                    )
+                    await self.risk_manager.set_leverage_if_needed(
+                        client_b, position.exchange_b, position.symbol_b
+                    )
+                    
+                    # Check balance sufficiency for leg A
+                    await self.risk_manager.check_balance_sufficiency(
+                        client_a,
+                        position.exchange_a,
+                        position.symbol_a,
+                        position.leg_a_side,
+                        position.leg_a_quantity,
+                    )
+                    
+                    # Check balance sufficiency for leg B
+                    await self.risk_manager.check_balance_sufficiency(
+                        client_b,
+                        position.exchange_b,
+                        position.symbol_b,
+                        position.leg_b_side,
+                        position.leg_b_quantity,
+                    )
+                    
+                except (InsufficientBalanceError, MaxPositionsError) as e:
+                    logger.error("Risk check failed: %s", e)
+                    if hist:
+                        hist.record_position_error(position, str(e))
+                    position.mark_error()
+                    return False
 
+            # Place first leg (leg A)
             order_a = await client_a.place_market_order(
                 symbol=position.symbol_a,
                 side=position.leg_a_side,
@@ -116,8 +176,8 @@ class OrderManager:
             )
             
             # Record order placement
-            if history:
-                history.record_order_placed(
+            if hist:
+                hist.record_order_placed(
                     position=position,
                     order_side=position.leg_a_side,
                     order_type="market",
@@ -125,45 +185,125 @@ class OrderManager:
                     price=entry_price_a,
                 )
 
-            order_b = await client_b.place_market_order(
-                symbol=position.symbol_b,
-                side=position.leg_b_side,
-                quantity=position.leg_b_quantity,
-            )
-            position.leg_b_order_id = order_b.order_id
-            entry_price_b = order_b.price
-            logger.debug(
-                "Order B placed: %s %s %s @ %s",
-                order_b.order_id,
-                position.leg_b_side,
-                position.leg_b_quantity,
-                entry_price_b,
-            )
-            
-            # Record second order placement
-            if history:
-                history.record_order_placed(
-                    position=position,
-                    order_side=position.leg_b_side,
-                    order_type="market",
+            # Try to place second leg (leg B)
+            # If this fails, rollback leg A
+            try:
+                order_b = await client_b.place_market_order(
+                    symbol=position.symbol_b,
+                    side=position.leg_b_side,
                     quantity=position.leg_b_quantity,
-                    price=entry_price_b,
                 )
+                position.leg_b_order_id = order_b.order_id
+                entry_price_b = order_b.price
+                logger.debug(
+                    "Order B placed: %s %s %s @ %s",
+                    order_b.order_id,
+                    position.leg_b_side,
+                    position.leg_b_quantity,
+                    entry_price_b,
+                )
+                
+                # Record second order placement
+                if hist:
+                    hist.record_order_placed(
+                        position=position,
+                        order_side=position.leg_b_side,
+                        order_type="market",
+                        quantity=position.leg_b_quantity,
+                        price=entry_price_b,
+                    )
 
-            position.mark_opened(entry_price_a, entry_price_b)
-            self.active_positions.append(position)
+                position.mark_opened(entry_price_a, entry_price_b)
+                self.active_positions.append(position)
 
-            logger.info(
-                "Position %s opened with spread %.4f%%",
-                position.position_id,
-                position.entry_spread * 100,
-            )
-            return True
+                logger.info(
+                    "Position %s opened with spread %.4f%%",
+                    position.position_id,
+                    position.entry_spread * 100,
+                )
+                return True
+                
+            except Exception as e:
+                # Leg B failed - rollback leg A
+                logger.error(
+                    "Leg B failed, rolling back leg A (order %s): %s",
+                    order_a.order_id,
+                    e,
+                    exc_info=True,
+                )
+                
+                # Execute rollback by placing opposite order
+                await self._rollback_order(
+                    client_a,
+                    position.symbol_a,
+                    position.leg_a_side,
+                    position.leg_a_quantity,
+                    order_a.order_id,
+                )
+                
+                if hist:
+                    hist.record_position_error(
+                        position,
+                        f"Leg B failed, rolled back leg A: {e}",
+                    )
+                
+                position.mark_error()
+                return False
 
         except Exception as e:
             logger.error("Failed to place entry orders: %s", e, exc_info=True)
+            if hist:
+                hist.record_position_error(position, str(e))
             position.mark_error()
             return False
+    
+    async def _rollback_order(
+        self,
+        client: ExchangeClient,
+        symbol: str,
+        original_side: str,
+        quantity: float,
+        original_order_id: str,
+    ) -> None:
+        """Rollback an order by placing an opposite market order.
+        
+        Args:
+            client: Exchange client
+            symbol: Trading symbol
+            original_side: Side of the original order
+            quantity: Quantity to rollback
+            original_order_id: ID of the original order
+        """
+        try:
+            # Place opposite order to close the position
+            rollback_side = "sell" if original_side == "buy" else "buy"
+            logger.info(
+                "Rolling back order %s: placing %s %s %s",
+                original_order_id,
+                rollback_side,
+                quantity,
+                symbol,
+            )
+            
+            rollback_order = await client.place_market_order(
+                symbol=symbol,
+                side=rollback_side,
+                quantity=quantity,
+            )
+            
+            logger.info(
+                "Rollback successful: order %s closed with %s",
+                original_order_id,
+                rollback_order.order_id,
+            )
+            
+        except Exception as e:
+            logger.error(
+                "Failed to rollback order %s: %s. Manual intervention required!",
+                original_order_id,
+                e,
+                exc_info=True,
+            )
 
     async def exit_order(
         self,

@@ -374,7 +374,7 @@ class TestOrderManagerIntegrationWithHistory:
             
             # Verify complete lifecycle was recorded
             trades = history.get_recent_trades(hours=1)
-            assert len(trades) == 3
+            assert len(trades) == 4  # created, opened, order_placed, closed
             
             # Verify event types
             event_types = [t["event_type"] for t in trades]
