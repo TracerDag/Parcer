@@ -39,10 +39,23 @@ class ExchangeSettings(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class ArbitrageSettings(BaseModel):
+    enabled: bool = False
+    scenario: str = Field(default="a", pattern="^(a|b)$")
+    entry_threshold: float = Field(default=0.05, ge=0)
+    exit_threshold: float = Field(default=0.01, ge=0)
+    exchange_a: str | None = None
+    exchange_b: str | None = None
+    symbol: str | None = None
+
+    model_config = {"extra": "forbid"}
+
+
 class Settings(BaseModel):
     env: str = "dev"
     proxy: ProxySettings = Field(default_factory=ProxySettings)
     trading: TradingSettings = Field(default_factory=TradingSettings)
+    arbitrage: ArbitrageSettings = Field(default_factory=ArbitrageSettings)
     exchanges: dict[str, ExchangeSettings] = Field(default_factory=dict)
 
     model_config = {"extra": "forbid"}

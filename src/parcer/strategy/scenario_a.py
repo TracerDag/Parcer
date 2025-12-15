@@ -111,7 +111,11 @@ class ScenarioAStrategy:
             )
 
             success = await self.order_manager.entry_order(
-                position, futures_client, spot_client
+                position,
+                futures_client,
+                spot_client,
+                price_hint_a=futures_price,
+                price_hint_b=spot_price,
             )
 
             if success:
