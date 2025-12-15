@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .orders.position import Position, PositionStatus
-from .orders.manager import OrderStatus
 
 logger = logging.getLogger(__name__)
 
@@ -180,8 +179,12 @@ class TradeHistory:
             event_type="position_created",
             position=position,
             status=position.status.value,
-            metadata={"leg_a_quantity": position.leg_a_quantity,
-                     "leg_b_quantity": position.leg_b_quantity}
+            metadata={
+                "leg_a_side": position.leg_a_side,
+                "leg_a_quantity": position.leg_a_quantity,
+                "leg_b_side": position.leg_b_side,
+                "leg_b_quantity": position.leg_b_quantity,
+            },
         )
         logger.info("Recorded position creation: %s", position.position_id)
 
@@ -192,8 +195,12 @@ class TradeHistory:
             position=position,
             status="opened",
             price=position.entry_spread or 0.0,
-            metadata={"entry_price_a": position.entry_price_a,
-                     "entry_price_b": position.entry_price_b}
+            metadata={
+                "entry_price_a": position.entry_price_a,
+                "entry_price_b": position.entry_price_b,
+                "leg_a_order_id": position.leg_a_order_id,
+                "leg_b_order_id": position.leg_b_order_id,
+            },
         )
         logger.info("Recorded position opening: %s", position.position_id)
 
@@ -204,10 +211,13 @@ class TradeHistory:
             position=position,
             pnl=position.pnl or 0.0,
             status="closed",
-            metadata={"exit_spread": position.exit_spread}
+            metadata={"exit_spread": position.exit_spread},
         )
-        logger.info("Recorded position closing: %s PnL: %.6f", 
-                   position.position_id, position.pnl or 0)
+        logger.info(
+            "Recorded position closing: %s PnL: %.6f",
+            position.position_id,
+            position.pnl or 0,
+        )
 
     def record_position_error(self, position: Position, error_message: str) -> None:
         """Record position error."""
@@ -215,10 +225,11 @@ class TradeHistory:
             event_type="position_error",
             position=position,
             status="error",
-            error_message=error_message
+            error_message=error_message,
         )
-        logger.error("Recorded position error: %s - %s", 
-                    position.position_id, error_message)
+        logger.error(
+            "Recorded position error: %s - %s", position.position_id, error_message
+        )
 
     def record_order_placed(
         self,
@@ -227,18 +238,93 @@ class TradeHistory:
         order_type: str,
         quantity: float,
         price: float,
+        *,
+        order_id: str | None = None,
+        exchange: str | None = None,
+        symbol: str | None = None,
+        status: str | None = None,
+        phase: str | None = None,
+        metadata: Dict[str, Any] | None = None,
     ) -> None:
         """Record order placement."""
+        md: Dict[str, Any] = {}
+        if metadata:
+            md.update(metadata)
+        if order_id is not None:
+            md["order_id"] = order_id
+        if exchange is not None:
+            md["exchange"] = exchange
+        if symbol is not None:
+            md["symbol"] = symbol
+        if status is not None:
+            md["order_status"] = status
+        if phase is not None:
+            md["phase"] = phase
+
         self.record_trade_event(
             event_type="order_placed",
             position=position,
             order_type=order_type,
             side=order_side,
             quantity=quantity,
-            price=price
+            price=price,
+            metadata=md or None,
         )
-        logger.debug("Recorded order placement: %s %s %s @ %s", 
-                    order_side, quantity, order_type, price)
+        logger.debug(
+            "Recorded order placement: %s %s %s @ %s", order_side, quantity, order_type, price
+        )
+
+    def record_order_rollback(
+        self,
+        position: Position,
+        *,
+        original_order_id: str | None,
+        rollback_order_id: str | None,
+        exchange: str,
+        symbol: str,
+        side: str,
+        quantity: float,
+        price: float,
+        status: str | None,
+        reason: str,
+    ) -> None:
+        self.record_trade_event(
+            event_type="order_rollback",
+            position=position,
+            order_type="market",
+            side=side,
+            quantity=quantity,
+            price=price,
+            status=status or "",
+            metadata={
+                "exchange": exchange,
+                "symbol": symbol,
+                "reason": reason,
+                "original_order_id": original_order_id,
+                "rollback_order_id": rollback_order_id,
+            },
+        )
+
+    def record_order_failed(
+        self,
+        position: Position,
+        *,
+        exchange: str,
+        symbol: str,
+        side: str,
+        quantity: float,
+        phase: str,
+        error_message: str,
+    ) -> None:
+        self.record_trade_event(
+            event_type="order_failed",
+            position=position,
+            order_type="market",
+            side=side,
+            quantity=quantity,
+            error_message=error_message,
+            metadata={"exchange": exchange, "symbol": symbol, "phase": phase},
+        )
 
     def record_insufficient_balance(
         self,
@@ -296,10 +382,165 @@ class TradeHistory:
         """Get all events for a specific position."""
         with sqlite3.connect(self.sqlite_file) as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.execute("""
+            cursor = conn.execute(
+                """
                 SELECT * FROM trades 
                 WHERE position_id = ?
                 ORDER BY timestamp
-            """, (position_id,))
-            
+            """,
+                (position_id,),
+            )
+
             return [dict(row) for row in cursor.fetchall()]
+
+    def load_position(self, position_id: str) -> Position | None:
+        """Reconstruct a Position from persisted history."""
+        events = self.get_position_history(position_id)
+        if not events:
+            return None
+
+        created = next((e for e in events if e.get("event_type") == "position_created"), None)
+        if created is None:
+            return None
+
+        created_md = self._parse_metadata(created.get("metadata"))
+
+        position = Position(
+            position_id=created.get("position_id") or position_id,
+            symbol_a=created.get("symbol_a") or "",
+            exchange_a=created.get("exchange_a") or "",
+            symbol_b=created.get("symbol_b") or "",
+            exchange_b=created.get("exchange_b") or "",
+            scenario=created.get("scenario") or "",
+            leg_a_side=created_md.get("leg_a_side") or "",
+            leg_a_quantity=float(created_md.get("leg_a_quantity") or 0.0),
+            leg_b_side=created_md.get("leg_b_side") or "",
+            leg_b_quantity=float(created_md.get("leg_b_quantity") or 0.0),
+        )
+
+        position.created_at = (
+            self._parse_timestamp(created.get("timestamp")) or position.created_at
+        )
+
+        lifecycle = [
+            e
+            for e in events
+            if e.get("event_type")
+            in {"position_created", "position_opened", "position_closed", "position_error"}
+        ]
+        latest_lifecycle = lifecycle[-1] if lifecycle else created
+        latest_status = latest_lifecycle.get("status")
+        if latest_status:
+            try:
+                position.status = PositionStatus(latest_status)
+            except ValueError:
+                pass
+
+        opened = next(
+            (e for e in reversed(lifecycle) if e.get("event_type") == "position_opened"),
+            None,
+        )
+        if opened is not None:
+            opened_md = self._parse_metadata(opened.get("metadata"))
+            position.opened_at = self._parse_timestamp(opened.get("timestamp"))
+            position.entry_spread = float(opened.get("price") or 0.0)
+            position.entry_price_a = float(opened_md.get("entry_price_a") or 0.0)
+            position.entry_price_b = float(opened_md.get("entry_price_b") or 0.0)
+            position.leg_a_order_id = opened_md.get("leg_a_order_id")
+            position.leg_b_order_id = opened_md.get("leg_b_order_id")
+
+        closed = next(
+            (e for e in reversed(lifecycle) if e.get("event_type") == "position_closed"),
+            None,
+        )
+        if closed is not None:
+            closed_md = self._parse_metadata(closed.get("metadata"))
+            position.closed_at = self._parse_timestamp(closed.get("timestamp"))
+            position.exit_spread = closed_md.get("exit_spread")
+            position.pnl = closed.get("pnl")
+
+        return position
+
+    def list_positions(self, *, status: str | None = None) -> list[Position]:
+        """List positions reconstructed from history."""
+        with sqlite3.connect(self.sqlite_file) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                """
+                SELECT DISTINCT position_id
+                FROM trades
+                WHERE position_id IS NOT NULL
+                  AND position_id != ''
+                  AND position_id != 'ALERT'
+            """
+            )
+            position_ids = [row["position_id"] for row in cursor.fetchall()]
+
+        positions: list[Position] = []
+        for pid in position_ids:
+            position = self.load_position(pid)
+            if position is None:
+                continue
+            if status is not None and position.status.value != status:
+                continue
+            positions.append(position)
+
+        return positions
+
+    def count_open_positions(self) -> int:
+        """Count positions whose latest lifecycle status is OPENED."""
+        lifecycle_events = (
+            "position_created",
+            "position_opened",
+            "position_closed",
+            "position_error",
+        )
+
+        with sqlite3.connect(self.sqlite_file) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                """
+                SELECT t1.position_id, t1.status
+                FROM trades t1
+                JOIN (
+                    SELECT position_id, MAX(timestamp) AS max_ts
+                    FROM trades
+                    WHERE event_type IN (?, ?, ?, ?)
+                      AND position_id IS NOT NULL
+                      AND position_id != ''
+                      AND position_id != 'ALERT'
+                    GROUP BY position_id
+                ) t2
+                  ON t1.position_id = t2.position_id
+                 AND t1.timestamp = t2.max_ts
+            """,
+                lifecycle_events,
+            )
+
+            return sum(
+                1
+                for row in cursor.fetchall()
+                if row["status"] == PositionStatus.OPENED.value
+            )
+
+    @staticmethod
+    def _parse_metadata(raw: str | None) -> Dict[str, Any]:
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _parse_timestamp(raw: str | None) -> datetime | None:
+        if not raw:
+            return None
+        try:
+            ts = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        if ts.tzinfo is None:
+            return ts.replace(tzinfo=timezone.utc)
+        return ts

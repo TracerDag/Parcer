@@ -37,6 +37,9 @@ def _configure_logging(log_dir: Path | None = None):
     return configure_logging(log_dir)
 
 app = typer.Typer(help="Arbitrage trading bot CLI")
+trade_app = typer.Typer(help="Manual trade operations")
+app.add_typer(trade_app, name="trade")
+
 console = Console()
 logger = logging.getLogger(__name__)
 
@@ -71,7 +74,7 @@ def init_components(config_path: Optional[Path] = None):
     return container, history, order_manager
 
 
-@app.command()
+@trade_app.command("open")
 def trade_open(
     scenario: str = typer.Option(..., help="Arbitrage scenario (a or b)"),
     exchange_a: str = typer.Option(..., help="First exchange"),
@@ -126,10 +129,7 @@ async def _open_position_async(scenario: str, exchange_a: str, exchange_b: str, 
             leg_b_side="sell",
             leg_b_quantity=quantity,
         )
-        
-        # Record position creation
-        history.record_position_created(position)
-        
+
         progress.update(task, description="Placing orders...")
         
         # Check if exchange clients are available
@@ -153,9 +153,6 @@ async def _open_position_async(scenario: str, exchange_a: str, exchange_b: str, 
         )
         
         if success:
-            # Record position opening
-            history.record_position_opened(position)
-            
             spread_str = f"{position.entry_spread * 100:.4f}%" if position.entry_spread else "N/A"
             
             console.print(Panel.fit(
@@ -169,8 +166,6 @@ async def _open_position_async(scenario: str, exchange_a: str, exchange_b: str, 
             ))
             return True
         else:
-            # Record error
-            history.record_position_error(position, "Failed to place entry orders")
             console.print("[red]✗ Failed to open position[/red]")
             return False
             
@@ -180,7 +175,7 @@ async def _open_position_async(scenario: str, exchange_a: str, exchange_b: str, 
         return False
 
 
-@app.command()
+@trade_app.command("close")
 def trade_close(
     position_id: str = typer.Argument(..., help="Position ID to close"),
     config: Optional[Path] = typer.Option(None, help="Path to config file"),
@@ -234,9 +229,6 @@ async def _close_position_async(position_id: str, config: Optional[Path], progre
         )
         
         if success:
-            # Record position closing
-            history.record_position_closed(position)
-            
             pnl_str = f"{position.pnl:.6f}" if position.pnl else "0.000000"
             spread_str = f"{position.exit_spread * 100:.4f}%" if position.exit_spread else "N/A"
             
@@ -266,12 +258,28 @@ def positions_list(
     """List all positions."""
     
     try:
-        _, _, order_manager = init_components(config)
-        
-        positions = order_manager.get_active_positions() if status == "open" else list(order_manager.positions.values())
-        
+        _, history, order_manager = init_components(config)
+
+        normalized_status = None
         if status:
-            positions = [p for p in positions if p.status.value == status]
+            status_map = {
+                "open": "opened",
+                "opened": "opened",
+                "closed": "closed",
+                "closing": "closing",
+                "error": "error",
+                "pending": "pending",
+            }
+            normalized_status = status_map.get(status, status)
+
+        if hasattr(history, "list_positions"):
+            positions = history.list_positions(status=normalized_status)
+        else:
+            positions = (
+                order_manager.get_active_positions()
+                if normalized_status == "opened"
+                else list(order_manager.positions.values())
+            )
         
         if not positions:
             console.print("[yellow]No positions found[/yellow]")
@@ -296,8 +304,9 @@ def positions_list(
             
             # Color code status
             status_style = {
-                "open": "green",
-                "closed": "blue", 
+                "pending": "dim",
+                "opened": "green",
+                "closed": "blue",
                 "error": "red",
                 "closing": "yellow",
             }.get(position.status.value, "white")

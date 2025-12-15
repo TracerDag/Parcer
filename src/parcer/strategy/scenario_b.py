@@ -126,7 +126,11 @@ class ScenarioBStrategy:
             )
 
             success = await self.order_manager.entry_order(
-                position, long_exchange, short_exchange
+                position,
+                long_exchange,
+                short_exchange,
+                price_hint_a=spread_calc.price_discount,
+                price_hint_b=spread_calc.price_premium,
             )
 
             if success:

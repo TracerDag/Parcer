@@ -25,11 +25,15 @@ def test_cli_commands_available():
     runner = CliRunner()
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "trade-open" in result.output
-    assert "trade-close" in result.output
+    assert "trade" in result.output
     assert "positions-list" in result.output
     assert "balance-check" in result.output
     assert "history-show" in result.output
+
+    result = runner.invoke(app, ["trade", "--help"])
+    assert result.exit_code == 0
+    assert "open" in result.output
+    assert "close" in result.output
 
 
 @patch('src.parcer.cli._load_settings')
@@ -68,12 +72,13 @@ def test_trade_open_command_parsing(mock_init_components, mock_create_clients, m
     
     # Run command
     result = runner.invoke(app, [
-        "trade-open",
+        "trade",
+        "open",
         "--scenario", "a",
         "--exchange-a", "binance",
-        "--exchange-b", "okx", 
+        "--exchange-b", "okx",
         "--symbol", "BTCUSDT",
-        "--quantity", "0.1"
+        "--quantity", "0.1",
     ])
     
     # Verify command succeeded
@@ -107,12 +112,13 @@ def test_trade_open_scenario_validation(mock_init_components):
     
     # Run command with invalid scenario
     result = runner.invoke(app, [
-        "trade-open",
+        "trade",
+        "open",
         "--scenario", "invalid",
         "--exchange-a", "binance",
         "--exchange-b", "okx",
-        "--symbol", "BTCUSDT", 
-        "--quantity", "0.1"
+        "--symbol", "BTCUSDT",
+        "--quantity", "0.1",
     ])
     
     # Verify command failed with validation error
@@ -151,8 +157,9 @@ def test_trade_close_command_parsing(mock_init_components):
     
     # Run command
     result = runner.invoke(app, [
-        "trade-close",
-        "test-pos-123"
+        "trade",
+        "close",
+        "test-pos-123",
     ])
     
     # Verify command succeeded
@@ -179,8 +186,9 @@ def test_trade_close_position_not_found(mock_init_components):
     
     # Run command
     result = runner.invoke(app, [
-        "trade-close",
-        "nonexistent-pos"
+        "trade",
+        "close",
+        "nonexistent-pos",
     ])
     
     # Verify command failed
@@ -201,17 +209,19 @@ def test_positions_list_command(mock_init_components):
     
     # Mock positions
     from datetime import datetime, timezone
+
     mock_position1 = Mock()
     mock_position1.position_id = "pos-1"
     mock_position1.scenario = "a"
     mock_position1.symbol_a = "BTCUSDT"
     mock_position1.exchange_a = "binance"
     mock_position1.exchange_b = "okx"
-    mock_position1.status.value = "open"
+    mock_position1.status.value = "opened"
+    mock_position1.is_open = True
     mock_position1.entry_spread = 0.05
     mock_position1.pnl = 0.002
     mock_position1.created_at = datetime(2023, 12, 1, 12, 34, 56, tzinfo=timezone.utc)
-    
+
     mock_position2 = Mock()
     mock_position2.position_id = "pos-2"
     mock_position2.scenario = "b"
@@ -219,12 +229,12 @@ def test_positions_list_command(mock_init_components):
     mock_position2.exchange_a = "bybit"
     mock_position2.exchange_b = "gate"
     mock_position2.status.value = "closed"
+    mock_position2.is_open = False
     mock_position2.entry_spread = None
     mock_position2.pnl = None
     mock_position2.created_at = datetime(2023, 12, 1, 11, 22, 33, tzinfo=timezone.utc)
-    
-    mock_order_manager.positions.values.return_value = [mock_position1, mock_position2]
-    mock_order_manager.get_active_positions.return_value = [mock_position1]
+
+    mock_history.list_positions.return_value = [mock_position1, mock_position2]
     
     # Run command
     result = runner.invoke(app, ["positions-list"])

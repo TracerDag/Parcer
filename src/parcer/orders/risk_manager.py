@@ -22,7 +22,10 @@ class InsufficientBalanceError(Exception):
 
 class MaxPositionsError(Exception):
     """Raised when maximum positions limit is reached."""
-    pass
+
+
+class ExecutionDiscrepancyError(Exception):
+    """Raised when an order response indicates unexpected execution state."""
 
 
 class RiskManager:
@@ -219,3 +222,31 @@ class RiskManager:
         # Check balance sufficiency for both legs
         # Note: We can't get exact prices before placing orders, so we estimate
         logger.info("Validating balance sufficiency for both legs")
+
+    def is_order_filled(self, status: str | None) -> bool:
+        """Return True if the exchange reports the order as fully executed."""
+        if not status:
+            return False
+        return status.lower() in {"filled", "closed"}
+
+    def validate_order_execution(
+        self,
+        *,
+        exchange_name: str,
+        order: object,
+        expected_quantity: float,
+    ) -> None:
+        """Validate an order response is consistent with the intended execution."""
+        status = getattr(order, "status", None)
+        if not self.is_order_filled(status):
+            raise ExecutionDiscrepancyError(
+                f"Order not confirmed as filled on {exchange_name}: status={status!r}"
+            )
+
+        actual_qty = getattr(order, "quantity", None)
+        if isinstance(actual_qty, (int, float)) and expected_quantity > 0:
+            rel_diff = abs(actual_qty - expected_quantity) / expected_quantity
+            if rel_diff > 0.01:
+                raise ExecutionDiscrepancyError(
+                    f"Order quantity mismatch on {exchange_name}: expected={expected_quantity}, actual={actual_qty}"
+                )

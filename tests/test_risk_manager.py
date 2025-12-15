@@ -210,6 +210,82 @@ class TestOrderRollback:
         assert rollback_call[1]["quantity"] == 0.1
 
     @pytest.mark.asyncio
+    async def test_entry_order_rollback_on_second_leg_unconfirmed(self, order_manager):
+        """Test rollback when second leg is not confirmed as filled."""
+        position = order_manager.create_position(
+            symbol_a="BTCUSDT",
+            exchange_a="binance",
+            symbol_b="BTCUSDT",
+            exchange_b="bybit",
+            scenario="a",
+            leg_a_side="buy",
+            leg_a_quantity=0.1,
+            leg_b_side="sell",
+            leg_b_quantity=0.1,
+        )
+
+        client_a = AsyncMock()
+        client_b = AsyncMock()
+        client_a.name = "binance"
+        client_b.name = "bybit"
+
+        balance = Balance("USDT", 10000.0, 0.0)
+        client_a.get_balance = AsyncMock(return_value=balance)
+        client_b.get_balance = AsyncMock(return_value=balance)
+
+        order_a = Order(
+            order_id="order_a_123",
+            symbol="BTCUSDT",
+            side="buy",
+            quantity=0.1,
+            price=50000.0,
+            status="FILLED",
+        )
+        rollback_a = Order(
+            order_id="rollback_a_1",
+            symbol="BTCUSDT",
+            side="sell",
+            quantity=0.1,
+            price=49900.0,
+            status="FILLED",
+        )
+        order_b_pending = Order(
+            order_id="order_b_456",
+            symbol="BTCUSDT",
+            side="sell",
+            quantity=0.1,
+            price=50100.0,
+            status="PENDING",
+        )
+        hedge_b = Order(
+            order_id="hedge_b_1",
+            symbol="BTCUSDT",
+            side="buy",
+            quantity=0.1,
+            price=50150.0,
+            status="FILLED",
+        )
+
+        client_a.place_market_order = AsyncMock(side_effect=[order_a, rollback_a])
+        client_b.place_market_order = AsyncMock(side_effect=[order_b_pending, hedge_b])
+        client_b.cancel_order = AsyncMock(return_value=order_b_pending)
+
+        success = await order_manager.entry_order(position, client_a, client_b)
+
+        assert not success
+        assert position.status == PositionStatus.ERROR
+
+        assert client_a.place_market_order.call_count == 2
+        assert client_b.place_market_order.call_count == 2
+
+        rollback_call_a = client_a.place_market_order.call_args_list[1]
+        assert rollback_call_a[1]["side"] == "sell"
+
+        hedge_call_b = client_b.place_market_order.call_args_list[1]
+        assert hedge_call_b[1]["side"] == "buy"
+        client_b.cancel_order.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_entry_order_success_both_legs(self, order_manager):
         """Test successful entry order with both legs."""
         position = order_manager.create_position(
